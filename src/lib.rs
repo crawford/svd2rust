@@ -259,31 +259,36 @@ use svd::{Access, Defaults, Peripheral, Register, RegisterInfo, Usage};
 use syn::*;
 
 /// Trait that sanitizes name avoiding rust keywords and the like.
-trait SanitizeIdent {
+trait SanitizeSnakeCase {
     /// Sanitize a name; avoiding Rust keywords and the like.
-    fn sanitize_ident(&self) -> String;
+    fn sanitize_snake_case(&self) -> Cow<str>;
 }
 
-impl SanitizeIdent for str {
-    fn sanitize_ident(&self) -> String {
-        match self {
-            "fn" => "fn_".to_owned(),
-            "in" => "in_".to_owned(),
-            "match" => "match_".to_owned(),
-            "mod" => "mod_".to_owned(),
-            _ => self.to_owned(),
+impl SanitizeSnakeCase for str {
+    fn sanitize_snake_case(&self) -> Cow<str> {
+        match self.chars().next().unwrap_or('\0') {
+            '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
+                Cow::from(format!("_{}", self))
+            }
+            _ => Cow::from(match self {
+                "fn" => "fn_",
+                "in" => "in_",
+                "match" => "match_",
+                "mod" => "mod_",
+                _ => self,
+            })
         }
     }
 }
 
 /// Trait that sanitizes variant names
-trait SanitizeVariant {
+trait SanitizePascalCase {
     /// Sanitize a name; avoiding Rust keywords and the like.
-    fn sanitize_variant(&self) -> Cow<str>;
+    fn sanitize_pascal_case(&self) -> Cow<str>;
 }
 
-impl SanitizeVariant for str {
-    fn sanitize_variant(&self) -> Cow<str> {
+impl SanitizePascalCase for str {
+    fn sanitize_pascal_case(&self) -> Cow<str> {
         match self.chars().next().unwrap_or('\0') {
             '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
                 Cow::from(format!("_{}", self))
@@ -406,7 +411,7 @@ fn expand(registers: &[Register]) -> Vec<ExpandedRegister> {
             Register::Single(ref info) => {
                 out.push(ExpandedRegister {
                     info: info,
-                    name: info.name.to_snake_case().sanitize_ident(),
+                    name: info.name.to_snake_case().sanitize_snake_case().into_owned(),
                     offset: info.address_offset,
                     ty: Either::Left(info.name.to_pascal_case()),
                 })
@@ -443,7 +448,7 @@ fn expand(registers: &[Register]) -> Vec<ExpandedRegister> {
 
                     out.push(ExpandedRegister {
                         info: info,
-                        name: name.to_snake_case().sanitize_ident(),
+                        name: name.to_snake_case().sanitize_snake_case().into_owned(),
                         offset: offset,
                         ty: Either::Right(ty.clone()),
                     });
@@ -684,7 +689,7 @@ pub fn gen_register_r(r: &Register,
             continue;
         }
 
-        let name = Ident::new(field.name.to_snake_case().sanitize_ident());
+        let name = Ident::new(&*field.name.to_snake_case().sanitize_snake_case());
         let offset = field.bit_range.offset as u8;
 
         let width = field.bit_range.width;
@@ -749,7 +754,7 @@ pub fn gen_register_r(r: &Register,
                             (Cow::from(variant), None, true)
                         };
 
-                        let variant = Ident::new(&*variant.sanitize_variant());
+                        let variant = Ident::new(&*variant.sanitize_pascal_case());
                         if let Some(doc) = doc {
                             let doc = &*doc;
 
@@ -876,7 +881,7 @@ pub fn gen_register_w(r: &Register,
             continue;
         }
 
-        let name = Ident::new(field.name.to_snake_case().sanitize_ident());
+        let name = Ident::new(&*field.name.to_snake_case().sanitize_snake_case());
         let offset = field.bit_range.offset as u8;
 
         let width = field.bit_range.width;
@@ -899,78 +904,51 @@ pub fn gen_register_w(r: &Register,
         let mask = Lit::Int((1 << width) - 1, IntTy::Unsuffixed);
 
         let evalues = if field.enumerated_values.len() == 1 {
-            field.enumerated_values
-                .first()
-                .map(|evs| if let Some(ref base) = evs.derived_from {
-                    (evs, Some(base.to_pascal_case()))
-                } else {
-                    (evs, None)
-                })
+            field.enumerated_values.first()
         } else {
             field.enumerated_values
                 .iter()
                 .find(|ev| {
                     ev.usage == Some(Usage::Write) ||
-                    ev.usage == Some(Usage::ReadWrite)
+                        ev.usage == Some(Usage::ReadWrite)
                 })
-                .map(|evs| (evs, None))
         };
-        let item = if let Some((evalues, base)) = evalues {
-            let name_e = Ident::new(format!("{}W{}",
-                                            rname,
-                                            base.as_ref()
-                                                .unwrap_or(&field.name
-                                                    .to_pascal_case())));
+        let item = if let Some(evalues) = evalues {
+            let name_e = Ident::new(format!("{}W{}", rname, field.name.to_pascal_case()));
 
-            if base.is_none() {
-                    let mut variants = vec![];
-                    let arms = evalues.values
-                        .iter()
-                        .map(|e| {
-                            let variant = Ident::new(&*e.name.sanitize_variant());
-                            if let Some(ref doc) = e.description {
-                                variants.push(quote! {
-                                    #[doc = #doc]
-                                    #variant,
-                                });
-                            } else {
-                                variants.push(quote! {
-                                    #variant,
-                                });
-                            }
+            items.push(quote! {
+                pub struct #name_e<'a> {
+                    register: &'a mut #wident
+                }
+            });
 
-                            let value = e.value;
-                            quote! {
-                                #name_e::#variant => #value,
-                            }
-                        })
-                        .collect::<Vec<_>>();
+            let methods = evalues.values.iter().map(|ev| {
+                let name = Ident::new(&*ev.name.to_snake_case().sanitize_snake_case());
+                let value = ev.value;
 
-                items.push(quote! {
-                    #[derive(Clone, Copy, Eq, PartialEq)]
-                    pub enum #name_e {
-                        #(#variants)*
+                quote! {
+                    pub fn #name(self) -> &'a mut #wident {
+                        const MASK: #bits_ty = #mask;
+                        const OFFSET: u8 = #offset;
+
+                        self.register.bits &= !((MASK as #bits_ty) << OFFSET);
+                        self.register.bits |= #value << OFFSET;
+                        self.register
                     }
+                }
+            }).collect::<Vec<_>>();
 
-                    impl #name_e {
-                        #[inline(always)]
-                        fn bits(&self) -> #bits_ty {
-                            match *self {
-                                #(#arms)*
-                            }
-                        }
-                    }
-                });
-            }
+            items.push(quote! {
+                impl<'a> #name_e<'a> {
+                    #(#methods)*
+                }
+            });
 
             quote! {
-                pub fn #name(&mut self, value: #name_e) -> &mut Self {
-                    const MASK: #bits_ty = #mask;
-                    const OFFSET: u8 = #offset;
-
-                    self.bits &= !((MASK as #bits_ty) << OFFSET);
-                    self.bits |= value.bits() << OFFSET;
-                    self
+                pub fn #name(&mut self) -> #name_e {
+                    #name_e {
+                        register: self
+                    }
                 }
             }
         } else if width == 1 {
