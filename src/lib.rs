@@ -716,26 +716,41 @@ pub fn gen_register_r(r: &Register,
             field.enumerated_values
                 .first()
                 .map(|evs| if let Some(ref base) = evs.derived_from {
-                    (evs, Some(base.to_sanitized_pascal_case()))
+                    if let Some(evs) = fields.iter()
+                        .flat_map(|f| f.enumerated_values.iter())
+                        .find(|evs| {
+                            evs.name
+                                .as_ref()
+                                .map(|n| n == base)
+                                .unwrap_or(false) &&
+                            evs.usage != Some(Usage::Write)
+                        }) {
+                        (evs, true)
+                    } else {
+                        panic!("base <enumeratedValues> not found for {:?}",
+                               evs);
+                    }
                 } else {
-                    (evs, None)
+                    (evs, false)
                 })
         } else {
             field.enumerated_values
                 .iter()
-                .find(|ev| {
-                    ev.usage == Some(Usage::Read) ||
-                    ev.usage == Some(Usage::ReadWrite)
+                .find(|evs| {
+                    evs.usage == Some(Usage::Read) ||
+                    evs.usage == Some(Usage::ReadWrite)
                 })
-                .map(|evs| (evs, None))
+                .map(|evs| (evs, false))
         };
-        let item = if let Some((evalues, base)) = evalues {
+        let item = if let Some((evs, derived)) = evalues {
             let name_e = Ident::new(format!("{}R{}",
-                                   rname,
-                                   base.as_ref()
-                                       .unwrap_or(&field.name
-                                           .to_sanitized_pascal_case())));
-            if base.is_none() {
+                                            rname,
+                                            evs.name
+                                                .as_ref()
+                                                .map(|n| n.to_pascal_case())
+                                                .unwrap_or(field.name
+                                                    .to_pascal_case())));
+            if !derived {
                 let mut variants = vec![];
                 let mut enum2int_arms = vec![];
                 let mut int2enum_arms = vec![];
@@ -743,7 +758,7 @@ pub fn gen_register_r(r: &Register,
 
                 for i in 0..(1 << width) {
                     let (ev_name, doc, reserved) = if let Some(evalue) =
-                        evalues.values
+                        evs.values
                             .iter()
                             .filter(|ev| ev.value == Some(i))
                             .next() {
@@ -938,7 +953,26 @@ pub fn gen_register_w(r: &Register,
         let width_ty = width.to_ty();
 
         let evalues = if field.enumerated_values.len() == 1 {
-            field.enumerated_values.first()
+            field.enumerated_values
+                .first()
+                .map(|evs| if let Some(ref base) = evs.derived_from {
+                    if let Some(evs) = fields.iter()
+                        .flat_map(|f| f.enumerated_values.iter())
+                        .find(|evs| {
+                            evs.name
+                                .as_ref()
+                                .map(|n| n == base)
+                                .unwrap_or(false) &&
+                            evs.usage != Some(Usage::Read)
+                        }) {
+                        (evs, true)
+                    } else {
+                        panic!("base <enumeratedValues> not found for {:?}",
+                               evs);
+                    }
+                } else {
+                    (evs, false)
+                })
         } else {
             field.enumerated_values
                 .iter()
@@ -946,11 +980,21 @@ pub fn gen_register_w(r: &Register,
                     ev.usage == Some(Usage::Write) ||
                     ev.usage == Some(Usage::ReadWrite)
                 })
+                .map(|evs| (evs, false))
         };
-        if let Some(evalues) = evalues {
-            let fname = field.name.to_sanitized_pascal_case();
-            let proxy_name = Ident::new(format!("_{}W{}", rname, fname));
-            let enum_name = Ident::new(format!("{}W{}", rname, fname));
+        if let Some((evs, derived)) = evalues {
+            let enum_name =
+                Ident::new(format!("{}W{}",
+                                   rname,
+                                   evs.name
+                                       .as_ref()
+                                       .map(|n| n.to_sanitized_pascal_case())
+                                       .unwrap_or(field.name
+                                           .to_sanitized_pascal_case())));
+            let proxy_name =
+                Ident::new(format!("_{}W{}",
+                                   rname,
+                                   field.name.to_sanitized_pascal_case()));
 
             items.push(quote! {
                 pub struct #proxy_name<'a> {
@@ -962,7 +1006,7 @@ pub fn gen_register_w(r: &Register,
             let mut enum2int_arms = vec![];
             let mut variants = vec![];
 
-            for ev in &evalues.values {
+            for ev in &evs.values {
                 let ev_name = ev.name.to_sanitized_snake_case();
                 let value = ev.value
                     .expect("no <value> node in <enumeratedValue>");
@@ -1008,19 +1052,21 @@ pub fn gen_register_w(r: &Register,
 
             let all_variants_covered = variants.len() ==
                                        1 << field.bit_range.width;
-            items.push(quote! {
-                pub enum #enum_name {
-                    #(#variants)*
-                }
+            if !derived {
+                items.push(quote! {
+                    pub enum #enum_name {
+                        #(#variants)*
+                    }
 
-                impl #enum_name {
-                    pub fn bits(&self) -> #width_ty {
-                        match *self {
-                            #(#enum2int_arms)*
+                    impl #enum_name {
+                        pub fn bits(&self) -> #width_ty {
+                            match *self {
+                                #(#enum2int_arms)*
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
 
             let mname = Ident::new(&*format!("{}_bits",
                                              field.name
