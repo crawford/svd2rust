@@ -342,7 +342,7 @@ pub fn gen_peripheral(p: &Peripheral, d: &Defaults) -> Vec<Tokens> {
             Either::Left(ref ty) => Ident::from(&**ty),
             Either::Right(ref ty) => Ident::from(&***ty),
         };
-        let reg_name = Ident::new(&*register.name);
+        let reg_name = Ident::new(&*register.name.to_sanitized_snake_case());
         fields.push(quote! {
             #[doc = #comment]
             pub #reg_name : #reg_ty
@@ -411,7 +411,9 @@ fn expand(registers: &[Register]) -> Vec<ExpandedRegister> {
                     info: info,
                     name: info.name.to_sanitized_snake_case().into_owned(),
                     offset: info.address_offset,
-                    ty: Either::Left(info.name.to_sanitized_pascal_case().into_owned()),
+                    ty: Either::Left(info.name
+                        .to_sanitized_pascal_case()
+                        .into_owned()),
                 })
             }
             Register::Array(ref info, ref array_info) => {
@@ -728,56 +730,77 @@ pub fn gen_register_r(r: &Register,
                 .map(|evs| (evs, None))
         };
         let item = if let Some((evalues, base)) = evalues {
-            let name_e =
-                Ident::new(format!("{}R{}",
+            let name_e = Ident::new(format!("{}R{}",
                                    rname,
                                    base.as_ref()
                                        .unwrap_or(&field.name
                                            .to_sanitized_pascal_case())));
             if base.is_none() {
                 let mut variants = vec![];
-                let arms = (0..(1 << width))
-                    .map(|i| {
-                        let (variant, doc, reserved) = if let Some(evalue) =
-                            evalues.values
-                                .iter()
-                                .filter(|ev| ev.value == Some(i))
-                                .next() {
-                            let doc = evalue.description.as_ref().map(|s| &**s);
-                            let variant = &*evalue.name;
+                let mut enum2int_arms = vec![];
+                let mut int2enum_arms = vec![];
+                let mut methods = vec![];
 
-                            (Cow::from(variant), doc, false)
-                        } else {
-                            let variant = format!("_Reserved{:b}", i);
+                for i in 0..(1 << width) {
+                    let (ev_name, doc, reserved) = if let Some(evalue) =
+                        evalues.values
+                            .iter()
+                            .filter(|ev| ev.value == Some(i))
+                            .next() {
+                        let doc = evalue.description.as_ref().map(|s| &**s);
+                        let variant = &*evalue.name;
 
-                            (Cow::from(variant), None, true)
-                        };
+                        (Cow::from(variant), doc, false)
+                    } else {
+                        let variant = format!("_Reserved{:b}", i);
 
-                        let variant =
-                            Ident::new(&*variant.to_sanitized_pascal_case());
-                        if let Some(doc) = doc {
-                            let doc = &*doc;
+                        (Cow::from(variant), None, true)
+                    };
 
-                            variants.push(quote! {
+                    let variant = if reserved {
+                        Ident::new(&*ev_name)
+                    } else {
+                        Ident::new(&*ev_name.to_sanitized_pascal_case())
+                    };
+
+                    if let Some(doc) = doc {
+                        let doc = &*doc;
+
+                        variants.push(quote! {
                             #[doc = #doc]
                             #variant,
                         });
-                        } else if reserved {
-                            variants.push(quote! {
+                    } else if reserved {
+                        variants.push(quote! {
                             #[doc(hidden)]
                             #variant,
                         });
-                        } else {
-                            variants.push(quote! {
+                    } else {
+                        variants.push(quote! {
                             #variant,
                         });
-                        }
-
-                        quote! {
-                        #i => #name_e::#variant,
                     }
-                    })
-                    .collect::<Vec<_>>();
+
+                    int2enum_arms.push(quote! {
+                        #i => #name_e::#variant,
+                    });
+
+                    enum2int_arms.push(quote! {
+                        #name_e::#variant => #i,
+                    });
+
+                    if !reserved {
+                        let mname = Ident::new(format!("is_{}",
+                                                       (&*ev_name)
+                                                           .to_snake_case()));
+                        methods.push(quote! {
+                            #[inline(always)]
+                            pub fn #mname(&self) -> bool {
+                                *self == #name_e::#variant
+                            }
+                        })
+                    }
+                }
 
                 items.push(quote! {
                     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -789,10 +812,19 @@ pub fn gen_register_r(r: &Register,
                         #[inline(always)]
                         fn from(value: #bits_ty) -> Self {
                             match value {
-                                #(#arms)*
+                                #(#int2enum_arms)*
                                 _ => unreachable!(),
                             }
                         }
+
+                        #[inline(always)]
+                        pub fn bits(&self) -> #bits_ty {
+                            match *self {
+                                #(#enum2int_arms)*
+                            }
+                        }
+
+                        #(#methods)*
                     }
                 });
             }
