@@ -781,12 +781,13 @@ pub fn gen_register_r(r: &Register,
                         });
                     }
 
+                    let value = Lit::Int(i as u64, IntTy::Unsuffixed);
                     int2enum_arms.push(quote! {
-                        #i => #name_e::#variant,
+                        #value => #name_e::#variant,
                     });
 
                     enum2int_arms.push(quote! {
-                        #name_e::#variant => #i,
+                        #name_e::#variant => #value,
                     });
 
                     if !reserved {
@@ -810,7 +811,7 @@ pub fn gen_register_r(r: &Register,
 
                     impl #name_e {
                         #[inline(always)]
-                        fn from(value: #bits_ty) -> Self {
+                        fn from(value: #width_ty) -> Self {
                             match value {
                                 #(#int2enum_arms)*
                                 _ => unreachable!(),
@@ -818,7 +819,7 @@ pub fn gen_register_r(r: &Register,
                         }
 
                         #[inline(always)]
-                        pub fn bits(&self) -> #bits_ty {
+                        pub fn bits(&self) -> #width_ty {
                             match *self {
                                 #(#enum2int_arms)*
                             }
@@ -831,10 +832,10 @@ pub fn gen_register_r(r: &Register,
 
             quote! {
                 pub fn #name(&self) -> #name_e {
-                    const MASK: #bits_ty = #mask;
+                    const MASK: #width_ty = #mask;
                     const OFFSET: u8 = #offset;
 
-                    #name_e::from((self.bits >> OFFSET) & MASK)
+                    #name_e::from((self.bits >> OFFSET) as #width_ty & MASK)
                 }
             }
         } else if width == 1 {
@@ -848,10 +849,10 @@ pub fn gen_register_r(r: &Register,
         } else {
             quote! {
                 pub fn #name(&self) -> #width_ty {
-                    const MASK: #bits_ty = #mask;
+                    const MASK: #width_ty = #mask;
                     const OFFSET: u8 = #offset;
 
-                    ((self.bits >> OFFSET) & MASK) as #width_ty
+                    (self.bits >> OFFSET) as #width_ty & MASK
                 }
             }
         };
@@ -934,6 +935,7 @@ pub fn gen_register_w(r: &Register,
         }
 
         let mask = Lit::Int((1 << width) - 1, IntTy::Unsuffixed);
+        let width_ty = width.to_ty();
 
         let evalues = if field.enumerated_values.len() == 1 {
             field.enumerated_values.first()
@@ -945,52 +947,126 @@ pub fn gen_register_w(r: &Register,
                     ev.usage == Some(Usage::ReadWrite)
                 })
         };
-        let item = if let Some(evalues) = evalues {
-            let name_e = Ident::new(format!("{}W{}",
-                                            rname,
-                                            field.name
-                                                .to_sanitized_pascal_case()));
+        if let Some(evalues) = evalues {
+            let fname = field.name.to_sanitized_pascal_case();
+            let proxy_name = Ident::new(format!("_{}W{}", rname, fname));
+            let enum_name = Ident::new(format!("{}W{}", rname, fname));
 
             items.push(quote! {
-                pub struct #name_e<'a> {
+                pub struct #proxy_name<'a> {
                     register: &'a mut #wident
                 }
             });
 
-            let methods = evalues.values
-                .iter()
-                .map(|ev| {
-                    let name = Ident::new(&*ev.name.to_sanitized_snake_case());
-                    let value = ev.value;
+            let mut methods = vec![];
+            let mut enum2int_arms = vec![];
+            let mut variants = vec![];
 
-                    quote! {
-                    pub fn #name(self) -> &'a mut #wident {
-                        const MASK: #bits_ty = #mask;
+            for ev in &evalues.values {
+                let ev_name = ev.name.to_sanitized_snake_case();
+                let value = ev.value
+                    .expect("no <value> node in <enumeratedValue>");
+                let value = Lit::Int(u64::from(value), IntTy::Unsuffixed);
+
+                let mname = Ident::new(&*ev_name);
+                methods.push(quote! {
+                    pub fn #mname(self) -> &'a mut #wident {
+                        const MASK: #width_ty = #mask;
                         const OFFSET: u8 = #offset;
 
                         self.register.bits &= !((MASK as #bits_ty) << OFFSET);
                         self.register.bits |= #value << OFFSET;
                         self.register
                     }
-                }
-                })
-                .collect::<Vec<_>>();
+                });
+
+                let variant = Ident::new(&*ev.name.to_sanitized_pascal_case());
+
+                enum2int_arms.push(quote! {
+                     #enum_name::#variant => #value,
+                });
+
+                // TODO docs
+                variants.push(quote! {
+                    #variant,
+                });
+            }
 
             items.push(quote! {
-                impl<'a> #name_e<'a> {
+                impl<'a> #proxy_name<'a> {
                     #(#methods)*
                 }
             });
 
-            quote! {
-                pub fn #name(&mut self) -> #name_e {
-                    #name_e {
+            impl_items.push(quote! {
+                pub fn #name(&mut self) -> #proxy_name {
+                    #proxy_name {
                         register: self
                     }
                 }
-            }
+            });
+
+            let all_variants_covered = variants.len() ==
+                                       1 << field.bit_range.width;
+            items.push(quote! {
+                pub enum #enum_name {
+                    #(#variants)*
+                }
+
+                impl #enum_name {
+                    pub fn bits(&self) -> #width_ty {
+                        match *self {
+                            #(#enum2int_arms)*
+                        }
+                    }
+                }
+            });
+
+            let mname = Ident::new(&*format!("{}_bits",
+                                             field.name
+                                                 .to_sanitized_snake_case()));
+            let bits_method = if all_variants_covered {
+                quote! {
+                    pub fn #mname(&mut self, bits: #width_ty) -> &mut Self {
+                        const MASK: #width_ty = #mask;
+                        const OFFSET: u8 = #offset;
+
+                        self.bits &= !((MASK as #bits_ty) << OFFSET);
+                        self.bits |= ((bits & MASK) as #bits_ty) << OFFSET;
+                        self
+                    }
+                }
+            } else {
+                quote! {
+                    pub unsafe fn #mname(&mut self,
+                                         bits: #width_ty) -> &mut Self {
+                        const MASK: #width_ty = #mask;
+                        const OFFSET: u8 = #offset;
+
+                        self.bits &= !((MASK as #bits_ty) << OFFSET);
+                        self.bits |= ((bits & MASK) as #bits_ty) << OFFSET;
+                        self
+                    }
+                }
+            };
+
+            impl_items.push(bits_method);
+
+            let mname = Ident::new(&*format!("{}_enum",
+                                             field.name
+                                                 .to_sanitized_snake_case()));
+            impl_items.push(quote! {
+                pub fn #mname(&mut self, value: #enum_name) -> &mut Self {
+                    const MASK: #width_ty = #mask;
+                    const OFFSET: u8 = #offset;
+
+                    self.bits &= !((MASK as #bits_ty) << OFFSET);
+                    self.bits |= ((value.bits() & MASK) as #bits_ty) << OFFSET;
+                    self
+                }
+            })
         } else if width == 1 {
-            quote! {
+            impl_items.push(quote! {
                 pub fn #name(&mut self, value: bool) -> &mut Self {
                     const OFFSET: u8 = #offset;
 
@@ -1001,23 +1077,19 @@ pub fn gen_register_w(r: &Register,
                     }
                     self
                 }
-            }
+            });
         } else {
-            let width_ty = width.to_ty();
-
-            quote! {
+            impl_items.push(quote! {
                 pub fn #name(&mut self, value: #width_ty) -> &mut Self {
                     const OFFSET: u8 = #offset;
                     const MASK: #width_ty = #mask;
 
-                    self.bits &= !((MASK as #bits_ty) << OFFSET);
+                    self.bits &= !(MASK << OFFSET) as #bits_ty;
                     self.bits |= ((value & MASK) as #bits_ty) << OFFSET;
                     self
                 }
-            }
+            });
         };
-
-        impl_items.push(item);
     }
 
     items.push(quote! {
