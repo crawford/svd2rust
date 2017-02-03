@@ -258,42 +258,40 @@ use quote::Tokens;
 use svd::{Access, Defaults, Peripheral, Register, RegisterInfo, Usage};
 use syn::*;
 
-/// Trait that sanitizes name avoiding rust keywords and the like.
-trait SanitizeSnakeCase {
-    /// Sanitize a name; avoiding Rust keywords and the like.
-    fn sanitize_snake_case(&self) -> Cow<str>;
+trait ToSanitizedPascalCase {
+    fn to_sanitized_pascal_case(&self) -> Cow<str>;
 }
 
-impl SanitizeSnakeCase for str {
-    fn sanitize_snake_case(&self) -> Cow<str> {
+trait ToSanitizedSnakeCase {
+    fn to_sanitized_snake_case(&self) -> Cow<str>;
+}
+
+impl ToSanitizedSnakeCase for str {
+    fn to_sanitized_snake_case(&self) -> Cow<str> {
         match self.chars().next().unwrap_or('\0') {
             '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
-                Cow::from(format!("_{}", self))
+                Cow::from(format!("_{}", self.to_snake_case()))
             }
-            _ => Cow::from(match self {
-                "fn" => "fn_",
-                "in" => "in_",
-                "match" => "match_",
-                "mod" => "mod_",
-                _ => self,
-            })
+            _ => {
+                Cow::from(match self {
+                    "fn" => "fn_",
+                    "in" => "in_",
+                    "match" => "match_",
+                    "mod" => "mod_",
+                    _ => return Cow::from(self.to_snake_case()),
+                })
+            }
         }
     }
 }
 
-/// Trait that sanitizes variant names
-trait SanitizePascalCase {
-    /// Sanitize a name; avoiding Rust keywords and the like.
-    fn sanitize_pascal_case(&self) -> Cow<str>;
-}
-
-impl SanitizePascalCase for str {
-    fn sanitize_pascal_case(&self) -> Cow<str> {
+impl ToSanitizedPascalCase for str {
+    fn to_sanitized_pascal_case(&self) -> Cow<str> {
         match self.chars().next().unwrap_or('\0') {
             '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
-                Cow::from(format!("_{}", self))
+                Cow::from(format!("_{}", self.to_pascal_case()))
             }
-            _ => Cow::from(self),
+            _ => Cow::from(self.to_pascal_case()),
         }
     }
 }
@@ -358,7 +356,7 @@ pub fn gen_peripheral(p: &Peripheral, d: &Defaults) -> Vec<Tokens> {
                  8;
     }
 
-    let p_name = Ident::new(p.name.to_pascal_case());
+    let p_name = Ident::new(&*p.name.to_sanitized_pascal_case());
 
     if let Some(description) = p.description.as_ref() {
         let comment = &respace(description)[..];
@@ -411,9 +409,9 @@ fn expand(registers: &[Register]) -> Vec<ExpandedRegister> {
             Register::Single(ref info) => {
                 out.push(ExpandedRegister {
                     info: info,
-                    name: info.name.to_snake_case().sanitize_snake_case().into_owned(),
+                    name: info.name.to_sanitized_snake_case().into_owned(),
                     offset: info.address_offset,
-                    ty: Either::Left(info.name.to_pascal_case()),
+                    ty: Either::Left(info.name.to_sanitized_pascal_case().into_owned()),
                 })
             }
             Register::Array(ref info, ref array_info) => {
@@ -425,7 +423,7 @@ fn expand(registers: &[Register]) -> Vec<ExpandedRegister> {
                     info.name.replace("%s", "")
                 };
 
-                let ty = Rc::new(ty.to_pascal_case());
+                let ty = Rc::new(ty.to_sanitized_pascal_case().into_owned());
 
                 let indices = array_info.dim_index
                     .as_ref()
@@ -448,7 +446,7 @@ fn expand(registers: &[Register]) -> Vec<ExpandedRegister> {
 
                     out.push(ExpandedRegister {
                         info: info,
-                        name: name.to_snake_case().sanitize_snake_case().into_owned(),
+                        name: name.to_sanitized_snake_case().into_owned(),
                         offset: offset,
                         ty: Either::Right(ty.clone()),
                     });
@@ -474,7 +472,7 @@ fn type_of(r: &Register) -> String {
         }
     };
 
-    (&*ty).to_pascal_case()
+    (&*ty).to_sanitized_pascal_case().into_owned()
 }
 
 fn access(r: &Register) -> Access {
@@ -689,7 +687,7 @@ pub fn gen_register_r(r: &Register,
             continue;
         }
 
-        let name = Ident::new(&*field.name.to_snake_case().sanitize_snake_case());
+        let name = Ident::new(&*field.name.to_sanitized_snake_case());
         let offset = field.bit_range.offset as u8;
 
         let width = field.bit_range.width;
@@ -716,7 +714,7 @@ pub fn gen_register_r(r: &Register,
             field.enumerated_values
                 .first()
                 .map(|evs| if let Some(ref base) = evs.derived_from {
-                    (evs, Some(base.to_pascal_case()))
+                    (evs, Some(base.to_sanitized_pascal_case()))
                 } else {
                     (evs, None)
                 })
@@ -730,11 +728,12 @@ pub fn gen_register_r(r: &Register,
                 .map(|evs| (evs, None))
         };
         let item = if let Some((evalues, base)) = evalues {
-            let name_e = Ident::new(format!("{}R{}",
-                                            rname,
-                                            base.as_ref()
-                                                .unwrap_or(&field.name
-                                                    .to_pascal_case())));
+            let name_e =
+                Ident::new(format!("{}R{}",
+                                   rname,
+                                   base.as_ref()
+                                       .unwrap_or(&field.name
+                                           .to_sanitized_pascal_case())));
             if base.is_none() {
                 let mut variants = vec![];
                 let arms = (0..(1 << width))
@@ -754,7 +753,8 @@ pub fn gen_register_r(r: &Register,
                             (Cow::from(variant), None, true)
                         };
 
-                        let variant = Ident::new(&*variant.sanitize_pascal_case());
+                        let variant =
+                            Ident::new(&*variant.to_sanitized_pascal_case());
                         if let Some(doc) = doc {
                             let doc = &*doc;
 
@@ -881,7 +881,7 @@ pub fn gen_register_w(r: &Register,
             continue;
         }
 
-        let name = Ident::new(&*field.name.to_snake_case().sanitize_snake_case());
+        let name = Ident::new(&*field.name.to_sanitized_snake_case());
         let offset = field.bit_range.offset as u8;
 
         let width = field.bit_range.width;
@@ -910,11 +910,14 @@ pub fn gen_register_w(r: &Register,
                 .iter()
                 .find(|ev| {
                     ev.usage == Some(Usage::Write) ||
-                        ev.usage == Some(Usage::ReadWrite)
+                    ev.usage == Some(Usage::ReadWrite)
                 })
         };
         let item = if let Some(evalues) = evalues {
-            let name_e = Ident::new(format!("{}W{}", rname, field.name.to_pascal_case()));
+            let name_e = Ident::new(format!("{}W{}",
+                                            rname,
+                                            field.name
+                                                .to_sanitized_pascal_case()));
 
             items.push(quote! {
                 pub struct #name_e<'a> {
@@ -922,11 +925,13 @@ pub fn gen_register_w(r: &Register,
                 }
             });
 
-            let methods = evalues.values.iter().map(|ev| {
-                let name = Ident::new(&*ev.name.to_snake_case().sanitize_snake_case());
-                let value = ev.value;
+            let methods = evalues.values
+                .iter()
+                .map(|ev| {
+                    let name = Ident::new(&*ev.name.to_sanitized_snake_case());
+                    let value = ev.value;
 
-                quote! {
+                    quote! {
                     pub fn #name(self) -> &'a mut #wident {
                         const MASK: #bits_ty = #mask;
                         const OFFSET: u8 = #offset;
@@ -936,7 +941,8 @@ pub fn gen_register_w(r: &Register,
                         self.register
                     }
                 }
-            }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
             items.push(quote! {
                 impl<'a> #name_e<'a> {
