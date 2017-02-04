@@ -1165,7 +1165,7 @@ pub fn gen_register_w(r: &Register,
                     const OFFSET: u8 = #offset;
                     const MASK: #width_ty = #mask;
 
-                    self.bits &= !(MASK << OFFSET) as #bits_ty;
+                    self.bits &= !(MASK as #bits_ty) << OFFSET;
                     self.bits |= ((value & MASK) as #bits_ty) << OFFSET;
                     self
                 }
